@@ -51,7 +51,7 @@ interval:
             # F6: 让你看到你熟悉的那个高电平值
             # FF: 确保最后一位是 FF，这样接收端如果用最后一位算RSSI，数值会很高
             - uart.write: [0x1F, 0x1F, 0x1F, 0xFF]
-            - logger.log: "Sent packet: F6 F6 F6 FF"
+            - logger.log: "Sent packet"
 
 # 控制开关
 switch:
