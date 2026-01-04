@@ -88,11 +88,22 @@ static LGFX lcd;               // LGFX实例
 // 缓存最近一次RSSI帧（纯二进制模式，5字节：前4字节数据，第5字节为RSSI）
 static uint8_t g_lastRaw = 0;
 static int g_lastRssiDbm = 0;
+static float g_estimatedDistance = 0.0;
 static unsigned long g_lastPacketMs = 0;
 static uint8_t g_frame[5] = {0};
 static size_t g_framePos = 0;
 static unsigned long g_totalBytes = 0;
 static unsigned long g_totalFrames = 0;
+static unsigned long g_validFrames = 0;
+static unsigned long g_invalidFrames = 0;
+static unsigned long g_discardedBytes = 0;
+
+// 帧同步状态
+enum FrameSyncState {
+  SEARCHING_HEADER,  // 搜索帧头
+  RECEIVING_DATA     // 接收数据中
+};
+static FrameSyncState g_syncState = SEARCHING_HEADER;
 
 // 动画相关变量
 struct Particle {
@@ -105,6 +116,40 @@ static Particle particles[8];
 static int rssiHistory[64] = {0};  // RSSI历史记录用于波形图
 static int rssiHistoryPos = 0;
 static unsigned long lastAnimUpdate = 0;
+
+// 帧格式定义
+const uint8_t FRAME_HEADER[4] = {0x1F, 0x1F, 0x1F, 0xFF};
+const size_t FRAME_LENGTH = 5;
+
+// RSSI距离估算参数
+const float RSSI_AT_1M = -50.0;  // 1米处的参考RSSI值（可根据实际标定调整）
+const float PATH_LOSS_EXPONENT = 2.5;  // 路径损耗指数（室内环境2-4，空旷环境约2）
+
+// 检查是否匹配帧头（滑动窗口检测）
+bool isFrameHeader() {
+  return (g_frame[0] == FRAME_HEADER[0] && 
+          g_frame[1] == FRAME_HEADER[1] && 
+          g_frame[2] == FRAME_HEADER[2] && 
+          g_frame[3] == FRAME_HEADER[3]);
+}
+
+// 根据RSSI估算距离（单位：米）
+float estimateDistance(int rssiDbm) {
+  if (rssiDbm == 0 || rssiDbm > -10) {
+    return 0.0;  // 无效或异常RSSI值
+  }
+  
+  // 对数路径损耗模型: distance = 10^((RSSI_at_1m - RSSI) / (10 * n))
+  float distance = pow(10.0, (RSSI_AT_1M - rssiDbm) / (10.0 * PATH_LOSS_EXPONENT));
+  
+  // 限制最大距离（可根据需要调整，或注释掉以移除限制）
+  // 注意：距离越远，RSSI估算的准确性越低
+  // if (distance > 500.0) {
+  //   distance = 500.0;  // 最大500米
+  // }
+  
+  return distance;
+}
 
 // 初始化粒子
 void initParticles() {
@@ -160,6 +205,7 @@ void drawRssiWaveform() {
     // 将RSSI值映射到0-10的高度范围
     int y1 = 179 - map(constrain(rssiHistory[prevIdx], -120, -40), -120, -40, 0, 9);
     int y2 = 179 - map(constrain(rssiHistory[currIdx], -120, -40), -120, -40, 0, 9);
+    // int y2 = 180 - map(constrain(rssiHistory[currIdx], -120, -40), -120, -40, 0, 50);
     
     // 根据信号强度选择颜色
     uint16_t color = TFT_RED;
@@ -205,19 +251,36 @@ void drawRssi()
   lcd.setTextColor(TFT_YELLOW);
   lcd.drawString(String(g_lastRssiDbm) + " dBm", 90, 60);
 
+  // 显示估算距离
+  lcd.setTextColor(TFT_CYAN);
+  lcd.setTextSize(2);
+  lcd.drawString("Dist:", 10, 80);
+  lcd.setTextColor(TFT_GREEN);
+  if (g_estimatedDistance < 10.0) {
+    lcd.drawString(String(g_estimatedDistance, 2) + " m", 90, 80);
+  } else {
+    lcd.drawString(String((int)g_estimatedDistance) + " m", 90, 80);
+  }
+
   lcd.setTextColor(TFT_WHITE);
   lcd.setTextSize(1);
-  lcd.drawString("Raw: 0x" + String(g_lastRaw, HEX), 10, 90);
+  lcd.drawString("Raw: 0x" + String(g_lastRaw, HEX), 10, 105);
   String frameStr = "Data: ";
   for (int i = 0; i < 4; ++i) {
     if (i) frameStr += ' ';
     if (g_frame[i] < 16) frameStr += '0';
     frameStr += String(g_frame[i], HEX);
   }
-  lcd.drawString(frameStr, 10, 105);
-  lcd.drawString("RSSI byte: " + String(g_frame[4], HEX), 10, 120);
-  lcd.drawString("Total: " + String(g_totalFrames) + " frames", 10, 135);
-  lcd.drawString("Bytes: " + String(g_totalBytes), 10, 150);
+  lcd.drawString(frameStr, 10, 120);
+  lcd.drawString("RSSI byte: " + String(g_frame[4], HEX), 10, 135);
+  
+  // 显示帧统计信息
+  lcd.setTextColor(TFT_GREEN);
+  lcd.drawString("Valid: " + String(g_validFrames), 10, 150);
+  lcd.setTextColor(TFT_RED);
+  lcd.drawString("Invalid: " + String(g_invalidFrames), 120, 150);
+  lcd.setTextColor(TFT_ORANGE);
+  lcd.drawString("Discard: " + String(g_discardedBytes), 220, 150);
   
   // 如果RSSI字节为0，显示满格信号图标
   if (g_frame[4] == 0) {
@@ -266,53 +329,98 @@ void setup(void)
 
 void loop(void)
 {
-  // 二进制 5 字节帧：前4字节数据，第5字节为 RSSI raw
+  // 二进制 5 字节帧：前4字节帧头 + 第5字节 RSSI
   while (Serial1.available()) {
     uint8_t b = static_cast<uint8_t>(Serial1.read());
     g_lastPacketMs = millis();
     g_totalBytes++;
 
 #if UART_LOG_EVERY_BYTE
-    Serial.printf("[%lu] RX[%u]=0x%02X (%3d)\n",
+    Serial.printf("[%lu] State=%s RX[%u]=0x%02X\n",
                   g_totalBytes,
+                  (g_syncState == SEARCHING_HEADER) ? "SEARCH" : "RECV",
                   static_cast<unsigned>(g_framePos),
-                  b, b);
+                  b);
 #endif
 
-    g_frame[g_framePos++] = b;
-
-    if (g_framePos >= 5) {
-      g_totalFrames++;
-      g_lastRaw = g_frame[4];
+    // 状态机处理
+    if (g_syncState == SEARCHING_HEADER) {
+      // 搜索帧头模式
+      g_frame[0] = g_frame[1];
+      g_frame[1] = g_frame[2];
+      g_frame[2] = g_frame[3];
+      g_frame[3] = b;
       
-      // 如果RSSI字节为0，直接输出0 dBm，否则按公式计算
-      if (g_lastRaw == 0) {
-        g_lastRssiDbm = 0;
+      if (isFrameHeader()) {
+        // 找到帧头，切换到接收数据状态
+        g_syncState = RECEIVING_DATA;
+        g_framePos = 4;  // 已经接收了4字节帧头
+        Serial.println("[SYNC] Frame header detected!");
       } else {
-        g_lastRssiDbm = -static_cast<int>(0xFF - g_lastRaw);
+        g_discardedBytes++;
       }
+    } else {  // RECEIVING_DATA
+      g_frame[g_framePos++] = b;
+    }
 
-      Serial.println("================================");
-      Serial.printf("Frame #%lu: %02X %02X %02X %02X %02X\n",
-                    g_totalFrames,
-                    g_frame[0], g_frame[1], g_frame[2], g_frame[3], g_frame[4]);
-      Serial.printf("RSSI: raw=0x%02X -> %d dBm\n", g_lastRaw, g_lastRssiDbm);
-      Serial.printf("Total bytes: %lu\n", g_totalBytes);
-      Serial.println("================================\n");
+    if (g_framePos >= FRAME_LENGTH) {
+      g_totalFrames++;
+      
+      // 验证帧头（应该已经匹配，但再次确认）
+      if (isFrameHeader()) {
+        // 帧合法，处理数据
+        g_validFrames++;
+        g_lastRaw = g_frame[4];
+        
+        // 如果RSSI字节为0，直接输出0 dBm，否则按公式计算
+        if (g_lastRaw == 0) {
+          g_lastRssiDbm = 0;
+        } else {
+          g_lastRssiDbm = -static_cast<int>(0xFF - g_lastRaw);
+        }
 
-      drawRssi();
+        // 估算距离
+        g_estimatedDistance = estimateDistance(g_lastRssiDbm);
+        
+        Serial.println("================================");
+        Serial.printf("Frame #%lu: %02X %02X %02X %02X %02X [VALID]\n",
+                      g_totalFrames,
+                      g_frame[0], g_frame[1], g_frame[2], g_frame[3], g_frame[4]);
+        Serial.printf("RSSI: raw=0x%02X -> %d dBm\n", g_lastRaw, g_lastRssiDbm);
+        Serial.printf("Estimated Distance: %.2f m\n", g_estimatedDistance);
+        Serial.printf("Total bytes: %lu\n", g_totalBytes);
+        Serial.println("================================\n");
+
+        drawRssi();
+        
+        // 更新RSSI历史
+        rssiHistory[rssiHistoryPos] = g_lastRssiDbm;
+        rssiHistoryPos = (rssiHistoryPos + 1) % 64;
+      } else {
+        // 帧格式不匹配（理论上不应该发生，因为已经同步）
+        g_invalidFrames++;
+        Serial.println("================================");
+        Serial.printf("Frame #%lu: %02X %02X %02X %02X %02X [INVALID]\n",
+                      g_totalFrames,
+                      g_frame[0], g_frame[1], g_frame[2], g_frame[3], g_frame[4]);
+        Serial.println("Expected: 1F 1F 1F FF xx");
+        Serial.printf("Stats - Valid:%lu Invalid:%lu Discarded:%lu\n",
+                      g_validFrames, g_invalidFrames, g_discardedBytes);
+        Serial.println("================================\n");
+      }
       
-      // 更新RSSI历史
-      rssiHistory[rssiHistoryPos] = g_lastRssiDbm;
-      rssiHistoryPos = (rssiHistoryPos + 1) % 64;
-      
+      // 重置状态，重新搜索帧头
+      g_syncState = SEARCHING_HEADER;
       g_framePos = 0;
     }
   }
 
   // 超时清空，避免卡死
   if (g_framePos > 0 && (millis() - g_lastPacketMs) > 500) {
-    Serial.printf("[WARN] Frame timeout, discard %u bytes\n", static_cast<unsigned>(g_framePos));
+    Serial.printf("[WARN] Frame timeout in state %s, discard %u bytes\n",
+                  (g_syncState == SEARCHING_HEADER) ? "SEARCH" : "RECV",
+                  static_cast<unsigned>(g_framePos));
+    g_syncState = SEARCHING_HEADER;
     g_framePos = 0;
   }
 
