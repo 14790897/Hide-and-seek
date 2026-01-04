@@ -1,10 +1,13 @@
-# ESP32C3 RSSI Monitor with ILI9341 Display
+# Hide-and-seek
 
-基于 ESP32C3 的 RSSI 信号强度监测系统，通过 UART 接收外部模块的无线信号数据，并在 ILI9341 TFT 屏幕上实时显示。
+基于 ESP32C3 的 LoRa RSSI 信号强度监测系统（收发配套）。该项目包含**接收端**和**发送端**两个配套使用的模块：
+
+- **接收端**（本项目）：通过 UART 接收无线信号数据，在 ILI9341 TFT 屏幕上实时显示 RSSI 值、信号波形和动画
+- **发送端**：基于 ESPHome，可定时发送数据包用于测试接收端信号强度
 
 ## 项目简介
 
-本项目使用 ESP32C3 微控制器与 ILI9341 TFT 显示屏，通过串口接收外部无线模块发送的 RSSI（接收信号强度指示）数据帧，并将信号强度、原始数据和统计信息实时显示在屏幕上。
+本项目使用 ESP32C3 微控制器与 ILI9341 TFT 显示屏，通过 UART 接收外部无线模块发送的 RSSI（接收信号强度指示）数据帧，并将信号强度、原始数据、波形图和统计信息实时显示在屏幕上。配合发送端使用，可以实时监测和调试 LoRa 无线通信的信号质量。
 
 ## 硬件要求
 
@@ -34,17 +37,35 @@
 
 **串口参数**: 9600 baud, 8N1
 
+## 发送端配置（ESPHome）
+
+项目包含基于 **ESPHome** 的发送端配置文件 `lora-esp32c3.yaml`，用于配套测试接收端。
+
+### 发送端特性
+- 定时发送数据包（默认每1秒）
+- 发送标准数据模式：`0x1F, 0x1F, 0x1F, 0xFF`
+
+
+### 发送端使用
+1. 将 `lora-esp32c3.yaml` 烧录到另一块 ESP32C3 中
+2. 配置 WiFi 信息和 API 密钥
+3. 通过 ESPHome 的 Web 界面控制发送或自动定时发送
+4. 接收端会实时显示接收到的信号强度
+
 ## 软件依赖
 
-### 开发环境
+### 接收端开发环境
 - [PlatformIO](https://platformio.org/)
 - Platform: espressif32@6.4.0
 - Framework: Arduino
 
-### 库依赖
+### 接收端库依赖
 - [LovyanGFX](https://github.com/lovyan03/LovyanGFX) - 高性能图形库
 
 依赖库已在 `platformio.ini` 中配置，PlatformIO 会自动下载。
+
+### 发送端依赖
+- [ESPHome](https://esphome.io/) - 开源自动化框架
 
 ## 数据格式
 
@@ -59,19 +80,31 @@
 - **RSSI_RAW**: 第 5 字节为 RSSI 原始值
 
 ### RSSI 计算公式
+当 RSSI_RAW = 0 时，显示 **0 dBm**（满格信号）
+
+当 RSSI_RAW ≠ 0 时：
 ```
 RSSI (dBm) = -(255 - RSSI_RAW)
 ```
 
 ## 功能特性
 
+**接收端**
 - ✅ 实时接收和解析 UART 数据帧
 - ✅ 计算并显示 RSSI 值（单位：dBm）
+- ✅ 满格信号（0 dBm）时显示双天线图标
 - ✅ 显示原始数据帧内容（十六进制）
+- ✅ 实时信号强度波形图
+- ✅ 移动粒子动画效果
 - ✅ 统计接收帧数和字节总数
 - ✅ 彩色 TFT 显示界面
 - ✅ USB CDC 串口调试输出
 - ✅ 帧超时自动重置机制
+
+**发送端**
+- ✅ 定时自动发送数据包 (`0x1F, 0x1F, 0x1F, 0xFF`)
+- ✅ 手动控制发送
+- ✅ Web 界面和 Home Assistant 集成
 
 ## 显示界面
 
@@ -85,26 +118,28 @@ RSSI (dBm) = -(255 - RSSI_RAW)
 
 ## 编译和上传
 
-### 1. 安装 PlatformIO
+### 接收端编译和上传
+
+#### 1. 安装 PlatformIO
 如果还未安装，请先安装 [PlatformIO IDE](https://platformio.org/platformio-ide) 或 [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation.html)。
 
-### 2. 克隆项目
+#### 2. 克隆项目
 ```bash
 git clone <repository-url>
 cd Hide-and-seek
 ```
 
-### 3. 编译项目
+#### 3. 编译项目
 ```bash
 platformio run
 ```
 
-### 4. 上传到开发板
+#### 4. 上传到开发板
 ```bash
 platformio run --target upload
 ```
 
-### 5. 监控串口输出
+#### 5. 监控串口输出
 ```bash
 platformio device monitor
 ```
@@ -113,6 +148,24 @@ platformio device monitor
 ```bash
 platformio run --target upload && platformio device monitor
 ```
+
+### 发送端编译和上传（ESPHome）
+
+#### 1. 安装 ESPHome
+```bash
+pip install esphome
+```
+
+#### 2. 准备配置文件
+编辑 `lora-esp32c3.yaml`，配置 WiFi 和其他参数
+
+#### 3. 编译和上传
+```bash
+esphome run lora-esp32c3.yaml
+```
+
+#### 4. 通过 Web 界面控制
+启动后可访问本地 Web 界面进行控制和配置
 
 ## 串口调试输出
 
@@ -151,6 +204,17 @@ Total bytes: 5
 lcd.setRotation(1);         // 屏幕旋转方向 (0-3)
 lcd.setBrightness(220);     // 背光亮度 (0-255)
 ```
+
+## 使用流程
+
+1. **硬件连接**：按照引脚连接表连接接收端的 ESP32C3、ILI9341 屏幕和无线模块
+2. **烧录接收端**：将接收端代码编译上传到接收端 ESP32C3
+3. **烧录发送端**：将发送端 ESPHome 配置编译上传到另一块 ESP32C3
+4. **开始测试**：
+   - 打开接收端串口监视器，观察调试输出
+   - 通过发送端的 Web 界面或自动定时模式发送数据
+   - 接收端屏幕实时显示接收到的 RSSI 值、波形图和动画
+5. **信号调试**：根据显示的信号强度调整天线位置或距离
 
 ## 故障排除
 
