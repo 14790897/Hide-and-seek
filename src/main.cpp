@@ -121,9 +121,9 @@ static unsigned long lastAnimUpdate = 0;
 const uint8_t FRAME_HEADER[4] = {0x1F, 0x1F, 0x1F, 0xFF};
 const size_t FRAME_LENGTH = 5;
 
-// RSSI距离估算参数
-const float RSSI_AT_1M = -50.0;  // 1米处的参考RSSI值（可根据实际标定调整）
-const float PATH_LOSS_EXPONENT = 2.5;  // 路径损耗指数（室内环境2-4，空旷环境约2）
+// RSSI距离估算参数（针对LoRa优化）
+const float RSSI_AT_1M = -40.0;  // 1米处的参考RSSI值（LoRa典型值-40dBm，可根据实际标定调整）
+const float PATH_LOSS_EXPONENT = 2.0;  // 路径损耗指数（空旷环境2.0，城市/室内2.5-4.0）
 
 // 检查是否匹配帧头（滑动窗口检测）
 bool isFrameHeader() {
